@@ -52,9 +52,13 @@ CLICK_COOLDOWN_SEC = 0.4        # Minimum seconds between consecutive clicks
 # Camera & display
 # ---------------------------------------------------------------------------
 DEFAULT_CAMERA_INDEX = 0
-WINDOW_NAME = "EyeTracker — Eye-Controlled Mouse"
+WINDOW_NAME = "EyeTracker"
 
-# On-screen text colours (BGR)
+# Compact window size (Apple-style miniaturised)
+WINDOW_WIDTH = 480
+WINDOW_HEIGHT = 360
+
+# Legacy on-screen text colours (BGR) — kept for any fallback usage
 COLOR_WHITE = (255, 255, 255)
 COLOR_YELLOW = (255, 255, 0)
 COLOR_RED = (0, 0, 255)

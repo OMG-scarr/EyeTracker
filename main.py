@@ -27,11 +27,15 @@ import sys
 import time
 import urllib.request
 
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
 import cv2
 import mediapipe as mp
+import numpy as np
 import pyautogui
 
 import config as cfg
+from ui import AppleHUD
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -154,6 +158,12 @@ class EyeTracker:
         )
         self.landmarker = FaceLandmarker.create_from_options(options)
 
+        # Apple-style HUD renderer
+        self.hud = AppleHUD()
+
+        # Latest average EAR (shared with HUD)
+        self._avg_ear = None
+
         # Camera handle (opened lazily in .run())
         self.cap = None
 
@@ -209,51 +219,44 @@ class EyeTracker:
         results = self.landmarker.detect_for_video(mp_image, self._frame_timestamp_ms)
 
         face_detected = False
+        self._avg_ear = None
+
         if results.face_landmarks:
             face_detected = True
-            # results.face_landmarks is a list of faces; each face is a list
-            # of NormalizedLandmark objects with .x, .y, .z attributes.
             lm = results.face_landmarks[0]
 
-            # --- Iris tracking (mouse movement) ---
-            # Landmarks 474-477 are the iris landmarks (when available).
-            # 474 = right edge, 475 = top, 476 = left edge, 477 = bottom.
+            # --- Iris tracking (mouse movement) with reticle overlay ---
             for idx, li in enumerate(range(474, 478)):
                 if li >= len(lm):
-                    break  # model didn't return iris landmarks
+                    break
                 point = lm[li]
                 px = int(point.x * frame_w)
                 py = int(point.y * frame_h)
-                cv2.circle(frame, (px, py), 2, cfg.COLOR_RED, -1)
 
                 if idx == cfg.IRIS_TRACK_INDEX:
+                    # Draw Apple-style reticle at primary tracking point
+                    self.hud.draw_iris_reticle(frame, px, py, radius=10)
                     mx = int(self.screen_w / frame_w * px)
                     my = int(self.screen_h / frame_h * py)
                     self._move_mouse(mx, my)
 
-            # --- Eye overlay (cyan dots on left-eye contour) ---
+            # --- Eye overlay (subtle dots on left-eye contour) ---
+            eye_pts = []
             for li in cfg.LEFT_EYE_OVERLAY:
                 if li < len(lm):
-                    ox = int(lm[li].x * frame_w)
-                    oy = int(lm[li].y * frame_h)
-                    cv2.circle(frame, (ox, oy), 2, cfg.COLOR_CYAN, -1)
+                    eye_pts.append((int(lm[li].x * frame_w),
+                                    int(lm[li].y * frame_h)))
+            if eye_pts:
+                self.hud.draw_eye_points(frame, eye_pts)
 
             # --- Blink detection via EAR ---
             left_ear = _eye_aspect_ratio(lm, cfg.LEFT_EYE_EAR_INDICES)
             right_ear = _eye_aspect_ratio(lm, cfg.RIGHT_EYE_EAR_INDICES)
             avg_ear = (left_ear + right_ear) / 2.0
+            self._avg_ear = avg_ear
 
             if avg_ear < self.ear_threshold:
                 self._try_click(avg_ear)
-
-            # Show live EAR value for debugging / calibration
-            ear_color = cfg.COLOR_GREEN if avg_ear >= self.ear_threshold else cfg.COLOR_RED
-            cv2.putText(
-                frame,
-                f"EAR: {avg_ear:.3f}",
-                (frame_w - 200, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, ear_color, 2,
-            )
 
         return frame, face_detected
 
@@ -274,34 +277,20 @@ class EyeTracker:
         if now - self._last_click_time >= cfg.CLICK_COOLDOWN_SEC:
             pyautogui.click(_pause=False)
             self._last_click_time = now
+            self.hud.notify_click()
             logger.info("Click — EAR %.4f (threshold %.3f)", ear_value, self.ear_threshold)
 
     # ----- HUD overlay -----------------------------------------------------
 
     def _draw_hud(self, frame, face_detected):
-        """Draw settings and status text on the video frame."""
-        cv2.putText(
+        """Render the Apple Camera-style HUD overlay."""
+        self.hud.draw(
             frame,
-            f"Sensitivity: {self.sensitivity:.1f}  [+/-]",
-            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, cfg.COLOR_WHITE, 2,
+            face_detected=face_detected,
+            sensitivity=self.sensitivity,
+            ear_threshold=self.ear_threshold,
+            avg_ear=self._avg_ear,
         )
-        cv2.putText(
-            frame,
-            f"EAR Threshold: {self.ear_threshold:.3f}  [ [ / ] ]",
-            (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, cfg.COLOR_WHITE, 2,
-        )
-        cv2.putText(
-            frame,
-            "Quit[c/Esc]  Min[m]  Max[x]",
-            (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, cfg.COLOR_YELLOW, 2,
-        )
-        if not face_detected:
-            cv2.putText(
-                frame,
-                "No face detected",
-                (10, frame.shape[0] - 20),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, cfg.COLOR_RED, 2,
-            )
 
     # ----- keyboard handling ------------------------------------------------
 
@@ -333,6 +322,7 @@ class EyeTracker:
         """Start the tracking loop.  Blocks until the user quits."""
         self._open_camera()
         cv2.namedWindow(cfg.WINDOW_NAME, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(cfg.WINDOW_NAME, cfg.WINDOW_WIDTH, cfg.WINDOW_HEIGHT)
         logger.info(
             "Tracking started — sensitivity=%.1f  ear_threshold=%.3f",
             self.sensitivity, self.ear_threshold,
@@ -344,6 +334,9 @@ class EyeTracker:
                 if not ret:
                     logger.warning("Camera returned no frame — retrying...")
                     continue
+
+                # Resize to compact Apple-style dimensions
+                frame = cv2.resize(frame, (cfg.WINDOW_WIDTH, cfg.WINDOW_HEIGHT))
 
                 frame, face_detected = self._process_frame(frame)
                 self._draw_hud(frame, face_detected)
